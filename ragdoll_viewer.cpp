@@ -166,6 +166,8 @@ BodyState standingTarget(const Ragdoll& ragdoll) {
     const Bone& rightUpperArm = ragdoll.bones[5];
     const Bone& leftUpperLeg = ragdoll.bones[7];
     const Bone& rightUpperLeg = ragdoll.bones[9];
+    const Bone& leftFoot = ragdoll.bones[8];
+    const Bone& rightFoot = ragdoll.bones[10];
 
     BodyState target;
     target.movement.x = std::clamp(-pelvis.pos.x * 0.9f - pelvis.vel.x * 0.2f, -0.35f, 0.35f);
@@ -174,11 +176,15 @@ BodyState standingTarget(const Ragdoll& ragdoll) {
 
     target.limbDrive[0] = std::clamp((leftUpperArm.pos.y - torso.pos.y) * 1.1f - leftUpperArm.vel.y * 0.1f, -0.35f, 0.35f);
     target.limbDrive[1] = std::clamp((rightUpperArm.pos.y - torso.pos.y) * 1.1f - rightUpperArm.vel.y * 0.1f, -0.35f, 0.35f);
-    target.limbDrive[2] = std::clamp((leftUpperLeg.pos.y - pelvis.pos.y) * -1.2f - leftUpperLeg.vel.y * 0.1f, -0.35f, 0.35f);
-    target.limbDrive[3] = std::clamp((rightUpperLeg.pos.y - pelvis.pos.y) * -1.2f - rightUpperLeg.vel.y * 0.1f, -0.35f, 0.35f);
+    float leftLegHeight = (leftUpperLeg.pos.y - pelvis.pos.y) * -1.2f - leftUpperLeg.vel.y * 0.1f;
+    float rightLegHeight = (rightUpperLeg.pos.y - pelvis.pos.y) * -1.2f - rightUpperLeg.vel.y * 0.1f;
+    float leftLegSupport = (leftFoot.pos.y < 0.04f ? 0.18f : -0.05f) + std::clamp((pelvis.pos.x + 0.12f) * 0.65f, -0.2f, 0.2f);
+    float rightLegSupport = (rightFoot.pos.y < 0.04f ? 0.18f : -0.05f) + std::clamp((0.12f - pelvis.pos.x) * 0.65f, -0.2f, 0.2f);
+    target.limbDrive[2] = std::clamp(leftLegHeight + leftLegSupport, -0.35f, 0.35f);
+    target.limbDrive[3] = std::clamp(rightLegHeight + rightLegSupport, -0.35f, 0.35f);
 
     target.speech = 0.0f;
-    target.expression = std::clamp(0.25f + std::max(0.0f, pelvis.pos.y - 0.2f) * 0.1f, 0.0f, 0.35f);
+    target.expression = std::clamp(0.25f + std::max(0.0f, pelvis.pos.y - 0.2f) * 0.1f + 0.05f * std::fabs(leftLegHeight - rightLegHeight), 0.0f, 0.35f);
     return target;
 }
 
@@ -257,6 +263,19 @@ bool stepLearningLoop(int globalFrame, int generationFrame, int generation, Body
     rightLegSignal.pos = ragdoll.bones[10].pos;
     rightLegSignal.value = ragdoll.bones[10].pos.y - ragdoll.bones[9].pos.y;
     feedback.push_back(rightLegSignal);
+
+    Signal leftFootSupport;
+    leftFootSupport.sense = SenseType::Touch;
+    leftFootSupport.section = BrainSection::Sensory;
+    leftFootSupport.pos = ragdoll.bones[8].pos;
+    leftFootSupport.value = std::max(0.0f, 0.05f - ragdoll.bones[8].pos.y) + std::fabs(ragdoll.bones[0].pos.x + 0.12f);
+    leftFootSupport.intensity = 0.15f;
+    feedback.push_back(leftFootSupport);
+
+    Signal rightFootSupport = leftFootSupport;
+    rightFootSupport.pos = ragdoll.bones[10].pos;
+    rightFootSupport.value = std::max(0.0f, 0.05f - ragdoll.bones[10].pos.y) + std::fabs(ragdoll.bones[0].pos.x - 0.12f);
+    feedback.push_back(rightFootSupport);
 
     inject_data(feedback);
 
