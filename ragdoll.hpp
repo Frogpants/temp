@@ -17,6 +17,7 @@ struct Bone {
     int id = -1;
     int parent = -1; // -1 for root
     vec3 pos = vec3(0.0f);
+    vec3 homePos = vec3(0.0f);
     vec3 prevPos = vec3(0.0f);
     vec3 vel = vec3(0.0f);
     float mass = 1.0f;
@@ -30,8 +31,17 @@ struct Bone {
     float maxAngle = 3.14159f;
 };
 
+struct ContactEvent {
+    vec3 position = vec3(0.0f);
+    vec3 normal = vec3(0.0f, 1.0f, 0.0f);
+    float strength = 0.0f;
+    int boneA = -1;
+    int boneB = -1;
+};
+
 struct Ragdoll {
     std::vector<Bone> bones;
+    std::vector<ContactEvent> contacts;
     vec3 gravity = vec3(0.0f, -9.81f, 0.0f);
 
     Ragdoll() {
@@ -42,25 +52,25 @@ struct Ragdoll {
         bones.clear();
 
         // Root (pelvis)
-        addBone(-1, vec3(0.0f, 1.0f, 0.0f), 2.0f);
+        addBone(-1, vec3(0.0f, 0.98f, 0.0f), 2.0f);
         // Torso
-        addBone(0, vec3(0.0f, 1.25f, 0.0f), 1.5f);
+        addBone(0, vec3(0.0f, 1.22f, 0.0f), 1.5f);
         // Head
-        addBone(1, vec3(0.0f, 1.5f, 0.0f), 0.8f);
+        addBone(1, vec3(0.0f, 1.46f, 0.0f), 0.8f);
 
         // Left arm (upper, lower)
-        addBone(1, vec3(-0.25f, 1.35f, 0.0f), 0.8f);
-        addBone(3, vec3(-0.6f, 1.2f, 0.0f), 0.6f);
+        addBone(1, vec3(-0.25f, 1.32f, 0.0f), 0.8f);
+        addBone(3, vec3(-0.58f, 1.16f, 0.0f), 0.6f);
         // Right arm
-        addBone(1, vec3(0.25f, 1.35f, 0.0f), 0.8f);
-        addBone(5, vec3(0.6f, 1.2f, 0.0f), 0.6f);
+        addBone(1, vec3(0.25f, 1.32f, 0.0f), 0.8f);
+        addBone(5, vec3(0.58f, 1.16f, 0.0f), 0.6f);
 
         // Left leg
-        addBone(0, vec3(-0.12f, 0.7f, 0.0f), 1.6f);
-        addBone(7, vec3(-0.12f, 0.35f, 0.0f), 1.2f);
+        addBone(0, vec3(-0.12f, 0.52f, 0.0f), 1.6f);
+        addBone(7, vec3(-0.12f, 0.0f, 0.0f), 1.2f);
         // Right leg
-        addBone(0, vec3(0.12f, 0.7f, 0.0f), 1.6f);
-        addBone(9, vec3(0.12f, 0.35f, 0.0f), 1.2f);
+        addBone(0, vec3(0.12f, 0.52f, 0.0f), 1.6f);
+        addBone(9, vec3(0.12f, 0.0f, 0.0f), 1.2f);
 
         // compute rest lengths and invMass
         for (auto &b : bones) {
@@ -86,6 +96,7 @@ struct Ragdoll {
         b.id = static_cast<int>(bones.size());
         b.parent = parent;
         b.pos = pos;
+        b.homePos = pos;
         b.mass = mass;
         b.invMass = 1.0f / mass;
         bones.push_back(b);
@@ -93,34 +104,71 @@ struct Ragdoll {
     }
 
     // Map BodyState to muscle forces. This is intentionally simple and
-    // tunable; movement.x/y/z steer limbs, speech/expression modulate torso.
+    // tunable; movement.x/y/z steer the root/torso while limbDrive values
+    // directly bias individual arms and legs.
     void applyMuscles(const BodyState& state, std::vector<vec3>& outForces) {
         outForces.assign(bones.size(), vec3(0.0f));
 
         if (bones.empty()) return;
 
-        // lateral sway -> arms
+        // global movement controls the root and torso balance.
         vec3 sway = state.movement;
+
+        if (bones.size() > 1) {
+            outForces[0] = outForces[0] + vec3(sway.x * 1.8f, sway.y * 2.0f, sway.z * 1.8f);
+            outForces[1] = outForces[1] + vec3(sway.x * 1.1f, sway.y * 1.5f, sway.z * 1.1f);
+        }
 
         // arms indices: 3 (left upper), 4 (left lower), 5 (right upper), 6 (right lower)
         if (bones.size() > 6) {
-            outForces[3] = vec3(-sway.x, sway.y * 0.5f, sway.z) * 3.0f;
-            outForces[4] = vec3(-sway.x * 0.6f, sway.y * 0.3f, sway.z * 0.5f) * 2.0f;
-            outForces[5] = vec3(-outForces[3].x, outForces[3].y, outForces[3].z);
-            outForces[6] = vec3(-outForces[4].x, outForces[4].y, outForces[4].z);
+            float leftArm = state.limbDrive[0];
+            float rightArm = state.limbDrive[1];
+
+            outForces[3] = vec3(-0.8f * leftArm - sway.x * 0.35f, 0.6f * leftArm + sway.y * 0.15f, 0.5f * leftArm + sway.z * 0.15f) * 4.0f;
+            outForces[4] = vec3(-0.5f * leftArm - sway.x * 0.2f, 0.3f * leftArm + sway.y * 0.1f, 0.3f * leftArm + sway.z * 0.08f) * 2.8f;
+            outForces[5] = vec3(0.8f * rightArm + sway.x * 0.35f, 0.6f * rightArm + sway.y * 0.15f, 0.5f * rightArm + sway.z * 0.15f) * 4.0f;
+            outForces[6] = vec3(0.5f * rightArm + sway.x * 0.2f, 0.3f * rightArm + sway.y * 0.1f, 0.3f * rightArm + sway.z * 0.08f) * 2.8f;
         }
 
-        // legs: use movement.y to drive forward/backwards
+        // legs get their own explicit control channels.
         if (bones.size() > 10) {
-            outForces[7] = vec3(sway.z * 2.0f, sway.y * -1.5f, sway.x * 0.2f);
-            outForces[8] = vec3(sway.z * 1.5f, sway.y * -1.0f, sway.x * 0.15f);
-            outForces[9] = vec3(-sway.z * 2.0f, sway.y * -1.5f, -sway.x * 0.2f);
-            outForces[10] = vec3(-sway.z * 1.5f, sway.y * -1.0f, -sway.x * 0.15f);
+            float leftLeg = state.limbDrive[2];
+            float rightLeg = state.limbDrive[3];
+
+            outForces[7] = vec3(-0.2f * leftLeg + sway.x * 0.2f, -1.4f * leftLeg + sway.y * -0.8f, 0.7f * leftLeg + sway.z * 0.2f) * 3.2f;
+            outForces[8] = vec3(-0.1f * leftLeg + sway.x * 0.12f, -0.9f * leftLeg + sway.y * -0.5f, 0.45f * leftLeg + sway.z * 0.14f) * 2.4f;
+            outForces[9] = vec3(0.2f * rightLeg - sway.x * 0.2f, -1.4f * rightLeg + sway.y * -0.8f, -0.7f * rightLeg + sway.z * 0.2f) * 3.2f;
+            outForces[10] = vec3(0.1f * rightLeg - sway.x * 0.12f, -0.9f * rightLeg + sway.y * -0.5f, -0.45f * rightLeg + sway.z * 0.14f) * 2.4f;
         }
 
         // torso modulation by speech/expression
-        outForces[1] += vec3(state.speech * 0.5f, state.expression * 0.2f, 0.0f);
-        outForces[0] += vec3(0.0f, -9.81f * bones[0].mass, 0.0f); // persistent gravity compensation on root
+        outForces[1] = outForces[1] + vec3(state.speech * 0.5f, state.expression * 0.2f + state.posture * 0.35f, 0.0f);
+    }
+
+    void applyStandingAssist(std::vector<vec3>& forces, float assist) {
+        if (assist <= 0.0f) return;
+
+        for (size_t i = 0; i < bones.size(); ++i) {
+            Bone& b = bones[i];
+            vec3 offset = b.homePos - b.pos;
+            float gain = b.stiffness * assist;
+            float dampingGain = b.damping * assist;
+
+            // Keep the pelvis and torso upright more aggressively than limbs.
+            if (b.id == 0 || b.id == 1) {
+                gain *= 2.5f;
+                dampingGain *= 2.0f;
+            }
+
+            forces[i] = forces[i] + offset * vec3(gain) - b.vel * vec3(dampingGain);
+
+            // Keep feet planted gently near the ground plane.
+            if (b.id == 8 || b.id == 10) {
+                forces[i].y += std::max(0.0f, (0.02f - b.pos.y) * 250.0f * assist);
+                forces[i].x -= b.vel.x * 3.0f * assist;
+                forces[i].z -= b.vel.z * 3.0f * assist;
+            }
+        }
     }
 
     // helper math
@@ -138,6 +186,24 @@ struct Ragdoll {
         float l = length(v);
         if (l <= 1e-6f) return vec3(0.0f);
         return v / vec3(l);
+    }
+
+    static bool finiteVec3(const vec3& v) {
+        return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+    }
+
+    void repairInvalidState() {
+        for (auto &b : bones) {
+            if (!finiteVec3(b.pos)) {
+                b.pos = vec3(0.0f, std::max(0.0f, 1.0f - 0.15f * static_cast<float>(b.id)), 0.0f);
+            }
+            if (!finiteVec3(b.prevPos)) {
+                b.prevPos = b.pos;
+            }
+            if (!finiteVec3(b.vel)) {
+                b.vel = vec3(0.0f);
+            }
+        }
     }
 
     // rotate vector 'v' around axis by angle (radians) using Rodrigues' formula
@@ -187,11 +253,19 @@ struct Ragdoll {
                 // ground collision
                 for (Bone* targetBone : { &b, &p }) {
                     if (targetBone->pos.y < 0.0f) {
+                        float penetration = -targetBone->pos.y;
                         targetBone->pos.y = 0.0f;
-                        targetBone->vel.y *= -0.2f;
+                        targetBone->vel.y = 0.0f;
                         // friction on ground
-                        targetBone->vel.x *= 0.8f;
-                        targetBone->vel.z *= 0.8f;
+                        targetBone->vel.x *= 0.45f;
+                        targetBone->vel.z *= 0.45f;
+
+                        ContactEvent contact;
+                        contact.position = targetBone->pos;
+                        contact.normal = vec3(0.0f, 1.0f, 0.0f);
+                        contact.strength = std::max(0.05f, penetration + std::fabs(targetBone->vel.x) + std::fabs(targetBone->vel.z));
+                        contact.boneA = targetBone->id;
+                        contacts.push_back(contact);
                     }
                 }
                 
@@ -234,17 +308,28 @@ struct Ragdoll {
                         vec3 n = d / vec3(dist);
                         a.pos = a.pos - n * vec3(overlap * wa);
                         c.pos = c.pos + n * vec3(overlap * wc);
+
+                        ContactEvent contact;
+                        contact.position = a.pos + n * vec3(a.radius + overlap * 0.5f);
+                        contact.normal = n;
+                        contact.strength = std::max(0.03f, overlap * 8.0f);
+                        contact.boneA = static_cast<int>(i);
+                        contact.boneB = static_cast<int>(j);
+                        contacts.push_back(contact);
                     }
                 }
             }
         }
     }
 
-    void step(float dt, const BodyState& bodyState) {
+    void step(float dt, const BodyState& bodyState, float assist = 0.0f) {
         if (bones.empty()) return;
+
+        contacts.clear();
 
         std::vector<vec3> forces(bones.size(), vec3(0.0f));
         applyMuscles(bodyState, forces);
+        applyStandingAssist(forces, assist);
 
         // integrate
         integrate(dt, forces);
@@ -252,9 +337,14 @@ struct Ragdoll {
         // constraints
         satisfyConstraints(5);
 
+        repairInvalidState();
+
         // damp velocities from positional changes
         for (auto &b : bones) {
             b.vel = (b.pos - b.prevPos) / dt;
+            if (b.pos.y <= 0.0f && b.vel.y < 0.0f) {
+                b.vel.y = 0.0f;
+            }
         }
     }
 

@@ -28,6 +28,16 @@ enum class BrainSection {
 
 constexpr int outputSlotCount = 8;
 
+inline float sanitizeFloat(float value, float fallback = 0.0f) {
+    return std::isfinite(value) ? value : fallback;
+}
+
+// Global learning signals shared by the simulation loop.
+// learningSignal modulates Hebbian adaptation strength, and outputNoiseScale
+// adds small exploration jitter to the generated control outputs.
+inline float learningSignal = 1.0f;
+inline float outputNoiseScale = 0.0f;
+
 inline int senseIndex(SenseType sense) {
     return static_cast<int>(sense);
 }
@@ -128,6 +138,8 @@ inline std::vector<Neuron> nearby(vec3 pos, float r) {
 inline void inject_data(std::vector<Signal> data) {
     for (int i = 0; i < data.size(); i++) {
         Signal signal = data[i];
+        signal.value = sanitizeFloat(signal.value);
+        signal.intensity = sanitizeFloat(signal.intensity);
         std::vector<Neuron> near = nearby(signal.pos, 0.02);
         int index = senseIndex(signal.sense);
         int sectionIndex = static_cast<int>(signal.section);
@@ -138,6 +150,7 @@ inline void inject_data(std::vector<Signal> data) {
             n.active += signal.value * signal.intensity;
             n.senseDrive[index] += signal.value * signal.intensity;
             n.sectionDrive[sectionIndex] += signal.value * signal.intensity;
+            n.active = sanitizeFloat(n.active);
             neurons[n.id] = n;
         }
     }
@@ -154,13 +167,16 @@ inline void propagate() {
             float trans = out * c.weight;
             if (c.target >= 0 && c.target < neurons.size()) {
                 neurons[c.target].active += trans;
+                neurons[c.target].active = sanitizeFloat(neurons[c.target].active);
             }
             c.usage += abs(trans);
+            c.usage = sanitizeFloat(c.usage);
 
             n.connections[j] = c;
         }
 
         n.active *= n.decay;
+        n.active = std::clamp(sanitizeFloat(n.active), -5.0f, 5.0f);
 
         neurons[i] = n; 
     }
@@ -169,6 +185,7 @@ inline void propagate() {
 inline void adapt() {
     for (int i = 0; i < neurons.size(); i++) {
         Neuron n = neurons[i];
+        float modulator = std::clamp(sanitizeFloat(learningSignal, 1.0f), -1.0f, 2.0f);
 
         for (int j = 0; j < n.connections.size(); j++) {
             Connection c = n.connections[j];
@@ -180,7 +197,8 @@ inline void adapt() {
 
             float corr = n.active * target.active;
 
-            c.weight += corr * c.plastic;
+            c.weight += corr * c.plastic * modulator;
+            c.weight = std::clamp(sanitizeFloat(c.weight), -2.0f, 2.0f);
             n.connections[j] = c;
         }
 
@@ -284,17 +302,21 @@ inline void grow() {
 inline void decay_sense_drive() {
     for (int i = 0; i < neurons.size(); i++) {
         Neuron n = neurons[i];
+        n.active = sanitizeFloat(n.active);
 
         for (int sense = 0; sense < static_cast<int>(SenseType::Count); sense++) {
             n.senseDrive[sense] *= 0.98f;
+            n.senseDrive[sense] = sanitizeFloat(n.senseDrive[sense]);
         }
 
         for (int section = 0; section < static_cast<int>(BrainSection::Count); section++) {
             n.sectionDrive[section] *= 0.98f;
+            n.sectionDrive[section] = sanitizeFloat(n.sectionDrive[section]);
         }
 
         for (int slot = 0; slot < outputSlotCount; slot++) {
             n.outputDrive[slot] *= 0.98f;
+            n.outputDrive[slot] = sanitizeFloat(n.outputDrive[slot]);
         }
 
         neurons[i] = n;
@@ -303,18 +325,68 @@ inline void decay_sense_drive() {
 
 inline BodyCommand collect_body_output() {
     BodyCommand command;
+    std::array<float, outputSlotCount> counts = {};
 
     for (int i = 0; i < neurons.size(); i++) {
         const Neuron& neuron = neurons[i];
 
         if (neuron.section == BrainSection::Output) {
             for (int slot = 0; slot < outputSlotCount; slot++) {
-                command.outputs[slot] += neuron.active * neuron.outputDrive[slot];
+                float contribution = neuron.active * neuron.outputDrive[slot];
+                if (std::isfinite(contribution)) {
+                    command.outputs[slot] += contribution;
+                    counts[slot] += 1.0f;
+                }
             }
         }
     }
 
+    if (outputNoiseScale > 0.0f) {
+        for (float &value : command.outputs) {
+            value += randRange(-outputNoiseScale, outputNoiseScale);
+        }
+    }
+
+    for (float &value : command.outputs) {
+        float count = counts[&value - &command.outputs[0]];
+        if (count > 0.0f) {
+            value /= count;
+        }
+        value = std::clamp(sanitizeFloat(value), -0.35f, 0.35f);
+    }
+
     return command;
+}
+
+inline void mutate_generation(float scale) {
+    if (scale <= 0.0f) return;
+
+    for (Neuron &neuron : neurons) {
+        neuron.threshold = std::clamp(sanitizeFloat(neuron.threshold + randRange(-scale, scale)), 0.05f, 2.0f);
+        neuron.decay = std::clamp(sanitizeFloat(neuron.decay + randRange(-scale * 0.2f, scale * 0.2f)), 0.8f, 0.9999f);
+
+        if (neuron.section == BrainSection::Output) {
+            for (int slot = 0; slot < outputSlotCount; ++slot) {
+                neuron.outputDrive[slot] = std::clamp(
+                    sanitizeFloat(neuron.outputDrive[slot] + randRange(-scale * 2.5f, scale * 2.5f)),
+                    -0.35f,
+                    0.35f
+                );
+
+                if (random() < 0.08f) {
+                    neuron.outputDrive[slot] = randRange(-0.3f, 0.3f);
+                }
+            }
+        }
+
+        for (Connection &connection : neuron.connections) {
+            connection.weight = std::clamp(
+                sanitizeFloat(connection.weight + randRange(-scale * 1.5f, scale * 1.5f)),
+                -2.0f,
+                2.0f
+            );
+        }
+    }
 }
 
 void prune() {

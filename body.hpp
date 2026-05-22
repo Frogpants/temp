@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <array>
 #include <random>
 #include <algorithm>
 #include <cmath>
@@ -16,8 +17,10 @@
 
 struct BodyState {
     vec3 movement = vec3(0.0f);
+    std::array<float, 4> limbDrive = { 0.0f, 0.0f, 0.0f, 0.0f };
     float speech = 0.0f;
     float expression = 0.0f;
+    float posture = 0.0f;
     float thought = 0.0f;   // internal scalar reflecting "thought"
     float emotion = 0.0f;   // internal scalar reflecting "emotion"
 };
@@ -25,8 +28,9 @@ struct BodyState {
 struct Body {
     BodyState state;
 
-    // Number of concrete actuators we expose: movement xyz + speech + expression
-    static constexpr int actuatorCount = 5;
+    // Number of concrete actuators we expose:
+    // movement xyz + four limb drives + speech + expression
+    static constexpr int actuatorCount = 9;
 
     // Weight matrix: actuatorCount x outputSlotCount
     std::vector<std::vector<float>> weights;
@@ -64,12 +68,15 @@ struct Body {
 
         // assign actuators to body state
         state.movement = vec3(actuators[0], actuators[1], actuators[2]);
-        state.speech = actuators[3];
-        state.expression = actuators[4];
+        state.limbDrive = { actuators[3], actuators[4], actuators[5], actuators[6] };
+        state.speech = actuators[7];
+        state.expression = actuators[8];
+
+        state.posture = 0.25f * (state.limbDrive[0] + state.limbDrive[1] + state.limbDrive[2] + state.limbDrive[3]);
 
         // compute internal thought/emotion as simple functions of actuators
-        state.thought = 0.5f * (state.speech + (state.movement.x + state.movement.y + state.movement.z) / 3.0f);
-        state.emotion = 0.5f * (state.expression + std::fabs(state.movement.y));
+        state.thought = 0.45f * (state.speech + (state.movement.x + state.movement.y + state.movement.z) / 3.0f) + 0.1f * state.posture;
+        state.emotion = 0.5f * (state.expression + std::fabs(state.movement.y)) + 0.1f * std::fabs(state.posture);
     }
 
     // Provide feedback signals to the neuron network derived from body state.
@@ -83,6 +90,12 @@ struct Body {
 
         // Proprioceptive touch-like feedback from movement
         signals.push_back({ SenseType::Touch, BrainSection::Sensory, state.movement, std::fabs(state.movement.y), 0.06f });
+
+        // Limb-specific feedback cues so the neurons can separate arm/leg control.
+        signals.push_back({ SenseType::Touch, BrainSection::Output, vec3(-0.35f, 1.2f, 0.0f), state.limbDrive[0], 0.05f });
+        signals.push_back({ SenseType::Touch, BrainSection::Output, vec3(0.35f, 1.2f, 0.0f), state.limbDrive[1], 0.05f });
+        signals.push_back({ SenseType::Touch, BrainSection::Output, vec3(-0.12f, 0.45f, 0.0f), state.limbDrive[2], 0.05f });
+        signals.push_back({ SenseType::Touch, BrainSection::Output, vec3(0.12f, 0.45f, 0.0f), state.limbDrive[3], 0.05f });
 
         // Auditory feedback from speech
         signals.push_back({ SenseType::Hearing, BrainSection::Association, vec3(state.speech, 0.0f, 0.0f), state.speech, 0.04f });
@@ -110,6 +123,56 @@ struct Body {
                 // Hebbian-like: correlate command component with actuator post-activation and scalar reward
                 weights[i][j] += lr * reward * lastCommand.outputs[j] * post;
             }
+        }
+    }
+
+    void teach(const BodyState& target, float lr = 1e-3f) {
+        float targets[9] = {
+            target.movement.x,
+            target.movement.y,
+            target.movement.z,
+            target.limbDrive[0],
+            target.limbDrive[1],
+            target.limbDrive[2],
+            target.limbDrive[3],
+            target.speech,
+            target.expression,
+        };
+
+        for (int i = 0; i < actuatorCount; ++i) {
+            float error = std::clamp(targets[i] - stateOutput(i), -1.0f, 1.0f);
+            for (int j = 0; j < outputSlotCount; ++j) {
+                weights[i][j] = std::clamp(weights[i][j] + lr * error * lastCommand.outputs[j], -0.35f, 0.35f);
+            }
+        }
+    }
+
+    void mutate(float scale) {
+        if (scale <= 0.0f) {
+            return;
+        }
+
+        std::normal_distribution<float> noise(0.0f, scale);
+        for (int i = 0; i < actuatorCount; ++i) {
+            for (int j = 0; j < outputSlotCount; ++j) {
+                weights[i][j] = std::clamp(weights[i][j] + noise(rng), -0.35f, 0.35f);
+            }
+        }
+    }
+
+private:
+    float stateOutput(int index) const {
+        switch (index) {
+            case 0: return state.movement.x;
+            case 1: return state.movement.y;
+            case 2: return state.movement.z;
+            case 3: return state.limbDrive[0];
+            case 4: return state.limbDrive[1];
+            case 5: return state.limbDrive[2];
+            case 6: return state.limbDrive[3];
+            case 7: return state.speech;
+            case 8: return state.expression;
+            default: return 0.0f;
         }
     }
 };
